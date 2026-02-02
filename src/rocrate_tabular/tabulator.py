@@ -275,8 +275,19 @@ class ROCrateTabulator:
             ]
             del self.config["potential_tables"][table_name]
 
+        # Build tables in order: first resolve dependencies by topological sort
+        # Simple heuristic: build tables with fewer entities first (usually reference types)
+        tables_to_build = list(self.config["tables"].keys())
+        tables_to_build.sort(
+            key=lambda t: self.db.query(
+                "SELECT COUNT(*) as cnt FROM property WHERE property_label = '@type' AND value = ?",
+                [t],
+            )[0]["cnt"]
+            if self.db else 0
+        )
+
         message = "### Properties\n"
-        for table in self.config["tables"]:
+        for table in tables_to_build:
             props = self.entity_table(table)
             self.config["tables"][table]["all_props"] = list(props)
 
