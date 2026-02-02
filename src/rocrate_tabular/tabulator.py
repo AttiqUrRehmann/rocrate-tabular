@@ -132,17 +132,37 @@ class EntityRecord:
 
     def add_expanded_property(self, prop, target):
         """Do a subquery on a target ID to make expanded properties like
-        author_name author_id"""
-        for ep_row in self.tabulator.fetch_properties(target):
-            expanded_prop = f"{prop}_{ep_row['property_label']}"
-            # Special case - if this is indexable text then we want to read t
-            self.props.add(expanded_prop)
-            if expanded_prop not in self.ignore_props:
-                self.set_property(
-                    expanded_prop,
-                    ep_row["value"],
-                    ep_row["target_id"],
-                )
+        author_name author_id.
+        
+        Now tries to use pre-built tables (via direct lookups) instead of querying
+        the property table repeatedly.
+        """
+        # Try to get the target's type for table-based lookup
+        target_type = self.tabulator.get_entity_type(target)
+        
+        if target_type and target_type in self.tabulator.config["tables"]:
+            # Table exists - use it (much faster!)
+            expanded_data = self.tabulator.fetch_expanded_properties_from_table(
+                target_type, target
+            )
+            
+            for key, value in expanded_data.items():
+                if key != "entity_id":
+                    expanded_prop = f"{prop}_{key}"
+                    self.props.add(expanded_prop)
+                    if expanded_prop not in self.ignore_props:
+                        self.set_property(expanded_prop, value, None)
+        else:
+            # Fallback to original method (property table queries)
+            for ep_row in self.tabulator.fetch_properties(target):
+                expanded_prop = f"{prop}_{ep_row['property_label']}"
+                self.props.add(expanded_prop)
+                if expanded_prop not in self.ignore_props:
+                    self.set_property(
+                        expanded_prop,
+                        ep_row["value"],
+                        ep_row["target_id"],
+                    )
 
     def set_property(self, prop, value, target_id):
         """Add a property to entity_data, and add the target_id if defined"""
@@ -586,6 +606,46 @@ tb.use_tables(["CreativeWork", "Person"])
     ORDER BY n_links desc
     """
         return self.db.query(query, [t])
+
+    def get_entity_type(self, entity_id):
+        """Get the @type of an entity by its ID"""
+        result = self.db.query(
+            """
+            SELECT value FROM property
+            WHERE source_id = ? AND property_label = '@type'
+            LIMIT 1
+            """,
+            [entity_id],
+        )
+        if result:
+            return result[0]["value"]
+        return None
+
+    def fetch_expanded_properties_from_table(self, target_type, target_id):
+        """Fetch all properties of a target entity from its table (not property table).
+        
+        Instead of:
+            SELECT * FROM property WHERE source_id = ?
+        
+        Use:
+            SELECT * FROM [PersonTable] WHERE entity_id = ?
+        
+        This is much faster for repeated queries.
+        """
+        try:
+            # Query the target type's already-built table
+            result = self.db.query(
+                f"SELECT * FROM [{target_type}] WHERE entity_id = ?",
+                [target_id],
+            )
+            if result:
+                row = result[0]
+                # Return as dict, excluding entity_id
+                return {k: v for k, v in row.items() if k != "entity_id"}
+            return {}
+        except Exception:
+            # Fallback: table might not exist yet
+            return {}
 
     def export_csv(self, rocrate_dir):
         """Export csvs as configured"""
