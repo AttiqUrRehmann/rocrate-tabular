@@ -254,6 +254,7 @@ class ROCrateTabulator:
         self.text_prop = None
         self.schemaCrate = minimal_crate()
         self.encodedProps = {}
+        self._entity_type_cache = {}  # Cache for entity types to avoid repeated queries
 
     def use_tables(self, table_names):
         if isinstance(table_names, str):
@@ -524,6 +525,9 @@ tb.use_tables(["CreativeWork", "Person"])
         the properties found during the build. text_prop is a property to
         be loaded and indexed as text. If it's none, the tabulator object's
         text_prop will be used."""
+        # Prefetch all entity types into cache before building (one batch query)
+        self.prefetch_entity_types()
+        
         self.entity_table_plan(table)
         entities = []
         allprops = set()
@@ -617,7 +621,15 @@ tb.use_tables(["CreativeWork", "Person"])
         return self.db.query(query, [t])
 
     def get_entity_type(self, entity_id: str) -> str | None:
-        """Return the @type of an entity (e.g. 'Person') from the property table."""
+        """Return the @type of an entity (e.g. 'Person') from cache or property table.
+        
+        Uses a cache to avoid repeated database queries for the same entity.
+        """
+        # Check cache first
+        if entity_id in self._entity_type_cache:
+            return self._entity_type_cache[entity_id]
+        
+        # Query if not cached
         row = next(
             self.db.query(
                 """
@@ -630,7 +642,31 @@ tb.use_tables(["CreativeWork", "Person"])
             ),
             None,
         )
-        return row["value"] if row else None
+        entity_type = row["value"] if row else None
+        
+        # Store in cache for next time
+        self._entity_type_cache[entity_id] = entity_type
+        return entity_type
+
+    def prefetch_entity_types(self):
+        """Prefetch all entity types into cache before table building.
+        
+        This single batch query replaces thousands of individual queries.
+        """
+        if not self.db:
+            return
+        
+        # Single efficient query to get all entity types
+        rows = self.db.query(
+            """
+            SELECT source_id, value
+            FROM property
+            WHERE property_label = '@type'
+            """
+        )
+        
+        for row in rows:
+            self._entity_type_cache[row["source_id"]] = row["value"]
 
     def fetch_expanded_properties_from_table(self, target_type: str, target_id: str) -> dict:
         """Fetch a target entity from its already-built entity table, as a dict."""
