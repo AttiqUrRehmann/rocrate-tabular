@@ -104,8 +104,8 @@ class EntityRecord:
     data: dict = field(default_factory=dict)
     junctions: dict = field(default_factory=dict)
 
-    def build(self, entity):
-        """Takes a Crate entity object and builds a dictionary to
+    def build(self, entity_dict):
+        """Takes a Crate entity dict and builds a dictionary to
         be inserted into the database, plus any junction records required"""
         self.data["entity_id"] = self.entity_id
         self.config = self.tabulator.config["tables"][self.table]
@@ -113,8 +113,8 @@ class EntityRecord:
         self.expand_props = self.config.get("expand_props", [])
         self.ignore_props = self.config.get("ignore_props", [])
     
-        # Iterate through entity properties directly from Crate object
-        for key, value in entity.props.items():
+        # Iterate through entity properties directly from dict
+        for key, value in entity_dict.items():
             if key == "@id":
                 continue
             self.props.add(key)
@@ -132,15 +132,15 @@ class EntityRecord:
                         self.data[key] = f"load failed: {e}"
                 elif key in self.expand_props and maybe_id:
                     # Only expand if it's a reference (has an ID)
-                    target_entity = self.tabulator.crate.get(maybe_id)
-                    if target_entity:
-                        self.add_expanded_property(key, target_entity)
+                    target_dict = self.get_entity_dict(maybe_id)
+                    if target_dict:
+                        self.add_expanded_property(key, target_dict)
                 elif key not in self.ignore_props:
                     # Determine display value for references
                     if maybe_id:
                         # For references, try to get target name; otherwise use empty string
-                        target = self.tabulator.crate.get(maybe_id)
-                        display_value = target["name"] if target and "name" in target else ""
+                        target_dict = self.get_entity_dict(maybe_id)
+                        display_value = target_dict.get("name", "") if target_dict else ""
                     else:
                         # For plain values, use as-is
                         display_value = v.get("name", "") if isinstance(v, dict) else v
@@ -149,11 +149,18 @@ class EntityRecord:
     
         return self.props
 
+    def get_entity_dict(self, entity_id):
+        """Helper to get entity dict from crate.graph by ID"""
+        for e in self.tabulator.crate.graph:
+            if e.get("@id") == entity_id:
+                return e
+        return None
 
-    def add_expanded_property(self, prop, target_entity):
-        """Build expanded properties like author_name, author_id from target entity"""
+
+    def add_expanded_property(self, prop, target_dict):
+        """Build expanded properties like author_name, author_id from target entity dict"""
         # Instead of querying, iterate through target entity's properties directly
-        for key, value in target_entity.props.items():
+        for key, value in target_dict.items():
             if key == "@id":
                 continue
         
@@ -541,18 +548,13 @@ tb.use_tables(["CreativeWork", "Person"])
             if not entity_id:
                 continue
             
-            # Get the TinyCrate entity object (not the dict) for proper property access
-            entity = self.crate.get(entity_id)
-            if not entity:
-                continue
-            
             entity_record = EntityRecord(
                 tabulator=self, 
                 table=table, 
                 entity_id=entity_id
             )
-            # CHANGE: Pass the entity object directly instead of properties from SQL
-            props = entity_record.build(entity)
+            # CHANGE: Pass the entity dict directly instead of properties from SQL
+            props = entity_record.build(entity_dict)
             allprops.update(props)
             entities.append(entity_record.data)
         
