@@ -123,13 +123,6 @@ class EntityRecord:
             values = get_as_list(value)
             for v in values:
                 maybe_id = get_as_id(v)  # Check if it's a reference to another entity
-                
-                # Determine display value (for references, try to use target name if available)
-                if maybe_id:
-                    target = self.tabulator.crate.get(maybe_id)
-                    display_value = target["name"] if target and "name" in target else ""
-                else:
-                    display_value = v.get("name", "") if isinstance(v, dict) else v
             
                 if key == self.text_prop and maybe_id:
                     # Only fetch text property if it's an actual reference with an ID
@@ -143,6 +136,14 @@ class EntityRecord:
                     if target_entity:
                         self.add_expanded_property(key, target_entity)
                 elif key not in self.ignore_props:
+                    # Determine display value for references
+                    if maybe_id:
+                        # For references, try to get target name; otherwise use empty string
+                        target = self.tabulator.crate.get(maybe_id)
+                        display_value = target["name"] if target and "name" in target else ""
+                    else:
+                        # For plain values, use as-is
+                        display_value = v.get("name", "") if isinstance(v, dict) else v
                     # Set all other properties (references and plain values)
                     self.set_property(key, display_value, maybe_id)
     
