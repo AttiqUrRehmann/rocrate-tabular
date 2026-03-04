@@ -104,7 +104,7 @@ class EntityRecord:
     data: dict = field(default_factory=dict)
     junctions: dict = field(default_factory=dict)
 
-    def build(self, properties):
+    def build(self, entity):
         """Takes the properties of this entity and builds a dictionary to
         be inserted into the database, plus any junction records required"""
         self.data["entity_id"] = self.entity_id
@@ -112,37 +112,52 @@ class EntityRecord:
         self.text_prop = self.tabulator.text_prop
         self.expand_props = self.config.get("expand_props", [])
         self.ignore_props = self.config.get("ignore_props", [])
-        for prop_row in properties:
-            prop = prop_row["property_label"]
-            value = prop_row["value"]
-            target = prop_row["target_id"]
-            self.props.add(prop)
-            if prop == self.text_prop:
-                try:
-                    self.data[prop] = self.tabulator.crate.get(target).fetch()
-                except TinyCrateException as e:
-                    self.data[prop] = f"load failed: {e}"
-            else:
-                if prop in self.expand_props and target:
-                    self.add_expanded_property(prop, target)
+        # Iterate through entity properties directly from Crate object
+        for key, value in entity.props.items():
+            if key == "@id":
+                continue
+            self.props.add(key)
+        
+            # Handle list of values
+            values = get_as_list(value)
+            for v in values:
+                maybe_id = get_as_id(v)  # Check if it's a reference to another entity
+            
+                if key == self.text_prop:
+                    try:
+                        self.data[key] = self.tabulator.crate.get(maybe_id).fetch()
+                    except (TinyCrateException, TypeError) as e:
+                        self.data[key] = f"load failed: {e}"
                 else:
-                    if prop not in self.ignore_props:
-                        self.set_property(prop, value, target)
+                    if key in self.expand_props and maybe_id:
+                        # Pass the actual target entity object
+                        target_entity = self.tabulator.crate.get(maybe_id)
+                        if target_entity:
+                            self.add_expanded_property(key, target_entity)
+                    else:
+                        # Determine display value (for references, use target name)
+                        display_value = v.get("name", "") if isinstance(v, dict) else v
+                        self.set_property(key, display_value, maybe_id)
+    
         return self.props
 
-    def add_expanded_property(self, prop, target):
+    def add_expanded_property(self, prop, target_entity):
         """Do a subquery on a target ID to make expanded properties like
         author_name author_id"""
-        for ep_row in self.tabulator.fetch_properties(target):
-            expanded_prop = f"{prop}_{ep_row['property_label']}"
-            # Special case - if this is indexable text then we want to read t
+        for key, value in target_entity.props.items():
+            if key == "@id":
+                continue
+        
+            expanded_prop = f"{prop}_{key}"
             self.props.add(expanded_prop)
+        
             if expanded_prop not in self.ignore_props:
-                self.set_property(
-                    expanded_prop,
-                    ep_row["value"],
-                    ep_row["target_id"],
-                )
+                # Handle list values
+                values = get_as_list(value)
+                for v in values:
+                    maybe_id = get_as_id(v)
+                    display_value = v.get("name", "") if isinstance(v, dict) else v
+                    self.set_property(expanded_prop, display_value, maybe_id)
 
     def set_property(self, prop, value, target_id):
         """Add a property to entity_data, and add the target_id if defined"""
@@ -500,26 +515,34 @@ tb.use_tables(["CreativeWork", "Person"])
         allprops = set()
         if text_prop is not None:
             self.text_prop = text_prop
-        for entity_id in tqdm(list(self.fetch_ids(table))):
-            entity = EntityRecord(tabulator=self, table=table, entity_id=entity_id)
-            props = entity.build(self.fetch_properties(entity_id))
-            allprops.update(props)
-            entities.append(entity.data)
-            for prop, target_ids in entity.junctions.items():
-                jtable = f"{table}_{prop}"
-                seq = 0
-                for target_id in target_ids:
-                    self.db[jtable].insert(
-                        {
-                            "seq": seq,
-                            "entity_id": entity_id,
-                            "target_id": target_id,
-                        },
-                        pk=("entity_id", "target_id"),
-                        replace=True,
-                        alter=True,
+        for entity in tqdm([e for e in self.crate.graph if e.get("@type") == table]):
+            entity_id = entity.get("@id")
+            if not entity_id:
+                continue
+            
+            entity_record = EntityRecord(
+                tabulator=self, 
+                table=table, 
+                entity_id=entity_id
+            )
+        props = entity_record.build(entity)
+        allprops.update(props)
+        entities.append(entity_record.data)
+        for prop, target_ids in entity.junctions.items():
+            jtable = f"{table}_{prop}"
+            seq = 0
+            for target_id in target_ids:
+                 self.db[jtable].insert(
+                    {
+                        "seq": seq,
+                        "entity_id": entity_id,
+                        "target_id": target_id,
+                    },
+                    pk=("entity_id", "target_id"),
+                    replace=True,
+                    alter=True,
                     )
-                    seq += 1
+            seq += 1
         self.db[table].insert_all(entities, pk="entity_id", replace=True, alter=True)
         self.config["tables"][table]["all_props"] = list(allprops)
         return list(allprops)
