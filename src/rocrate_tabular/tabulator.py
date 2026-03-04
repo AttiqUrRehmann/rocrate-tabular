@@ -105,13 +105,14 @@ class EntityRecord:
     junctions: dict = field(default_factory=dict)
 
     def build(self, entity):
-        """Takes the properties of this entity and builds a dictionary to
+        """Takes a Crate entity object and builds a dictionary to
         be inserted into the database, plus any junction records required"""
         self.data["entity_id"] = self.entity_id
         self.config = self.tabulator.config["tables"][self.table]
         self.text_prop = self.tabulator.text_prop
         self.expand_props = self.config.get("expand_props", [])
         self.ignore_props = self.config.get("ignore_props", [])
+    
         # Iterate through entity properties directly from Crate object
         for key, value in entity.props.items():
             if key == "@id":
@@ -122,28 +123,35 @@ class EntityRecord:
             values = get_as_list(value)
             for v in values:
                 maybe_id = get_as_id(v)  # Check if it's a reference to another entity
+                
+                # Determine display value (for references, try to use target name if available)
+                if maybe_id:
+                    target = self.tabulator.crate.get(maybe_id)
+                    display_value = target["name"] if target and "name" in target else ""
+                else:
+                    display_value = v.get("name", "") if isinstance(v, dict) else v
             
-                if key == self.text_prop:
+                if key == self.text_prop and maybe_id:
+                    # Only fetch text property if it's an actual reference with an ID
                     try:
                         self.data[key] = self.tabulator.crate.get(maybe_id).fetch()
                     except (TinyCrateException, TypeError) as e:
                         self.data[key] = f"load failed: {e}"
-                else:
-                    if key in self.expand_props and maybe_id:
-                        # Pass the actual target entity object
-                        target_entity = self.tabulator.crate.get(maybe_id)
-                        if target_entity:
-                            self.add_expanded_property(key, target_entity)
-                    else:
-                        # Determine display value (for references, use target name)
-                        display_value = v.get("name", "") if isinstance(v, dict) else v
-                        self.set_property(key, display_value, maybe_id)
+                elif key in self.expand_props and maybe_id:
+                    # Only expand if it's a reference (has an ID)
+                    target_entity = self.tabulator.crate.get(maybe_id)
+                    if target_entity:
+                        self.add_expanded_property(key, target_entity)
+                elif key not in self.ignore_props:
+                    # Set all other properties (references and plain values)
+                    self.set_property(key, display_value, maybe_id)
     
         return self.props
 
+
     def add_expanded_property(self, prop, target_entity):
-        """Do a subquery on a target ID to make expanded properties like
-        author_name author_id"""
+        """Build expanded properties like author_name, author_id from target entity"""
+        # Instead of querying, iterate through target entity's properties directly
         for key, value in target_entity.props.items():
             if key == "@id":
                 continue
@@ -157,7 +165,9 @@ class EntityRecord:
                 for v in values:
                     maybe_id = get_as_id(v)
                     display_value = v.get("name", "") if isinstance(v, dict) else v
-                    self.set_property(expanded_prop, display_value, maybe_id)
+                    # Set all properties: references and plain values
+                    if display_value or maybe_id:  # Only set if there's something to set
+                        self.set_property(expanded_prop, display_value, maybe_id)
 
     def set_property(self, prop, value, target_id):
         """Add a property to entity_data, and add the target_id if defined"""
@@ -515,9 +525,24 @@ tb.use_tables(["CreativeWork", "Person"])
         allprops = set()
         if text_prop is not None:
             self.text_prop = text_prop
-        for entity in tqdm([e for e in self.crate.graph if e.get("@type") == table]):
-            entity_id = entity.get("@id")
+    
+        # CHANGE: Iterate through Crate graph directly instead of fetching IDs from SQL
+        # Filter entities by type (handle both string and list types)
+        matching_entities = []
+        for e in self.crate.graph:
+            at = e.get("@type")
+            # @type can be a string or a list of types
+            if at == table or (isinstance(at, list) and table in at):
+                matching_entities.append(e)
+        
+        for entity_dict in tqdm(matching_entities):
+            entity_id = entity_dict.get("@id")
             if not entity_id:
+                continue
+            
+            # Get the TinyCrate entity object (not the dict) for proper property access
+            entity = self.crate.get(entity_id)
+            if not entity:
                 continue
             
             entity_record = EntityRecord(
@@ -525,10 +550,13 @@ tb.use_tables(["CreativeWork", "Person"])
                 table=table, 
                 entity_id=entity_id
             )
+            # CHANGE: Pass the entity object directly instead of properties from SQL
             props = entity_record.build(entity)
             allprops.update(props)
             entities.append(entity_record.data)
-            for prop, target_ids in entity.junctions.items():
+        
+            # Handle junction tables for many-to-many relations
+            for prop, target_ids in entity_record.junctions.items():
                 jtable = f"{table}_{prop}"
                 seq = 0
                 for target_id in target_ids:
@@ -543,6 +571,7 @@ tb.use_tables(["CreativeWork", "Person"])
                         alter=True,
                     )
                     seq += 1
+    
         self.db[table].insert_all(entities, pk="entity_id", replace=True, alter=True)
         self.config["tables"][table]["all_props"] = list(allprops)
         return list(allprops)
