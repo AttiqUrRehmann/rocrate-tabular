@@ -525,24 +525,24 @@ tb.use_tables(["CreativeWork", "Person"])
                 table=table, 
                 entity_id=entity_id
             )
-        props = entity_record.build(entity)
-        allprops.update(props)
-        entities.append(entity_record.data)
-        for prop, target_ids in entity.junctions.items():
-            jtable = f"{table}_{prop}"
-            seq = 0
-            for target_id in target_ids:
-                 self.db[jtable].insert(
-                    {
-                        "seq": seq,
-                        "entity_id": entity_id,
-                        "target_id": target_id,
-                    },
-                    pk=("entity_id", "target_id"),
-                    replace=True,
-                    alter=True,
+            props = entity_record.build(entity)
+            allprops.update(props)
+            entities.append(entity_record.data)
+            for prop, target_ids in entity.junctions.items():
+                jtable = f"{table}_{prop}"
+                seq = 0
+                for target_id in target_ids:
+                    self.db[jtable].insert(
+                        {
+                            "seq": seq,
+                            "entity_id": entity_id,
+                            "target_id": target_id,
+                        },
+                        pk=("entity_id", "target_id"),
+                        replace=True,
+                        alter=True,
                     )
-            seq += 1
+                    seq += 1
         self.db[table].insert_all(entities, pk="entity_id", replace=True, alter=True)
         self.config["tables"][table]["all_props"] = list(allprops)
         return list(allprops)
